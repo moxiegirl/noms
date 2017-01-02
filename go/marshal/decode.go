@@ -12,30 +12,48 @@ import (
 	"github.com/attic-labs/noms/go/types"
 )
 
-// Unmarshal converts a Noms value into a Go value. It decodes v and stores the result
-// in the value pointed to by out.
+// Unmarshal converts a Noms value into a Go value. It decodes v and stores the
+// result in the value pointed to by out.
 //
-// Unmarshal uses the inverse of the encodings that Marshal uses with the following additional rules:
+// Unmarshal uses the inverse of the encodings that Marshal uses with the
+// following additional rules:
 //
-// To unmarshal a Noms struct into a Go struct, Unmarshal matches incoming object
-// fields to the fields used by Marshal (either the struct field name or its tag).
-// Unmarshal will only set exported fields of the struct.
-// The name of the Go struct must match (ignoring case) the name of the Noms struct.
+// To unmarshal a Noms struct into a Go struct, Unmarshal matches incoming
+// object fields to the fields used by Marshal (either the struct field name or
+// its tag).  Unmarshal will only set exported fields of the struct.  The name
+// of the Go struct must match (ignoring case) the name of the Noms struct. All
+// exported fields on the Go struct must be present in the Noms struct, unless
+// the field on the Go struct is marked with the "omitempty" tag. Go struct
+// fields also support the "original" tag which causes the Go field to receive
+// the entire original unmarshaled Noms struct.
 //
-// To unmarshal a Noms list or set into a slice, Unmarshal resets the slice length to zero and then appends each element to the slice. If the Go slice was nil a new slice is created.
+// To unmarshal a Noms list or set into a slice, Unmarshal resets the slice
+// length to zero and then appends each element to the slice. If the Go slice
+// was nil a new slice is created when an element is added.
 //
-// To unmarshal a Noms list or set into a Go array, Unmarshal decodes Noms list elements into corresponding Go array elements.
+// To unmarshal a Noms list into a Go array, Unmarshal decodes Noms list
+// elements into corresponding Go array elements.
 //
-// To unmarshal a Noms map into a Go map, Unmarshal decodes Noms key and values into corresponding Go array elements. If the Go map was nil a new map is created.
+// To unmarshal a Noms map into a Go map, Unmarshal decodes Noms key and values
+// into corresponding Go array elements. If the Go map was nil a new map is
+// created if any value is set.
 //
-// When unmarshalling onto `interface{}` the following rules are used:
-//  - `types.Bool` -> `bool`
-//  - `types.List` -> `[]T`, where `T` is determined recursively using the same rules.
-//  - `types.Set` -> same as `types.List`
-//  - `types.Map` -> `map[T]V`, where `T` and `V` is determined recursively using the same rules.
-//  - `types.Number` -> `float64`
-//  - `types.String` -> `string`
-//  - `types.Union` -> `interface`
+// To unmarshal Noms sets, it depends on the presence of a `noms:",set"` tag:
+//  - Without (default), Unmarshal decodes into corresponding Go list elements.
+//  - With, Unmarshal decodes into Go map keys corresponding to the set values,
+//    with values struct{}{}. Map values must have struct{} type.
+//
+// When unmarshalling onto interface{} the following rules are used:
+//  - types.Bool -> bool
+//  - types.List -> []T, where T is determined recursively using the same rules.
+//  - types.Set -> depends on `noms:",set"` annotation: without, same as
+//    types.List, with, same as types.Map.
+//  - types.Map -> map[T]V, where T and V is determined recursively using the
+//    same rules.
+//  - types.Number -> float64
+//  - types.String -> string
+//  - *types.Type -> *types.Type
+//  - types.Union -> interface
 //  - Everything else an error
 //
 // Unmarshal returns an UnmarshalTypeMismatchError if:
@@ -60,12 +78,13 @@ func Unmarshal(v types.Value, out interface{}) (err error) {
 		return &InvalidUnmarshalError{reflect.TypeOf(out)}
 	}
 	rv = rv.Elem()
-	d := typeDecoder(rv.Type())
+	d := typeDecoder(rv.Type(), nomsTags{})
 	d(v, rv)
 	return
 }
 
-// InvalidUnmarshalError describes an invalid argument passed to Unmarshal. (The argument to Unmarshal must be a non-nil pointer.)
+// InvalidUnmarshalError describes an invalid argument passed to Unmarshal. (The
+// argument to Unmarshal must be a non-nil pointer.)
 type InvalidUnmarshalError struct {
 	Type reflect.Type
 }
@@ -81,7 +100,8 @@ func (e *InvalidUnmarshalError) Error() string {
 	return "Cannot unmarshal into Go nil pointer of type " + e.Type.String()
 }
 
-// UnmarshalTypeMismatchError describes a Noms value that was not appropriate for a value of a specific Go type.
+// UnmarshalTypeMismatchError describes a Noms value that was not appropriate
+// for a value of a specific Go type.
 type UnmarshalTypeMismatchError struct {
 	Value   types.Value
 	Type    reflect.Type // type of Go value it could not be assigned to
@@ -104,7 +124,7 @@ func overflowError(v types.Number, t reflect.Type) *UnmarshalTypeMismatchError {
 
 type decoderFunc func(v types.Value, rv reflect.Value)
 
-func typeDecoder(t reflect.Type) decoderFunc {
+func typeDecoder(t reflect.Type, tags nomsTags) decoderFunc {
 	switch t.Kind() {
 	case reflect.Bool:
 		return boolDecoder
@@ -125,7 +145,16 @@ func typeDecoder(t reflect.Type) decoderFunc {
 	case reflect.Array:
 		return arrayDecoder(t)
 	case reflect.Map:
-		return mapDecoder(t)
+		if shouldMapDecodeFromSet(t, tags) {
+			return mapFromSetDecoder(t)
+		}
+		return mapDecoder(t, tags)
+	case reflect.Ptr:
+		// Allow implementations of types.Value (like *types.Type)
+		if t.Implements(nomsValueInterface) {
+			return nomsValueDecoder
+		}
+		fallthrough
 	default:
 		panic(&UnsupportedTypeError{Type: t})
 	}
@@ -185,6 +214,10 @@ type decoderCacheT struct {
 
 var decoderCache = &decoderCacheT{}
 
+// Separate Set decoder cache because the same type with and without the
+// `noms:",set"` tag decode differently (Set vs Map).
+var setDecoderCache = &decoderCacheT{}
+
 func (c *decoderCacheT) get(t reflect.Type) decoderFunc {
 	c.RLock()
 	defer c.RUnlock()
@@ -201,9 +234,11 @@ func (c *decoderCacheT) set(t reflect.Type, d decoderFunc) {
 }
 
 type decField struct {
-	name    string
-	decoder decoderFunc
-	index   int
+	name      string
+	decoder   decoderFunc
+	index     int
+	omitEmpty bool
+	original  bool
 }
 
 func structDecoder(t reflect.Type) decoderFunc {
@@ -219,18 +254,19 @@ func structDecoder(t reflect.Type) decoderFunc {
 	fields := make([]decField, 0, t.NumField())
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
-		validateField(f, t)
-
-		tags := f.Tag.Get("noms")
-		if tags == "-" {
+		tags := getTags(f)
+		if tags.skip {
 			continue
 		}
 
-		name, _ := parseTags(tags, f)
+		validateField(f, t)
+
 		fields = append(fields, decField{
-			name:    name,
-			decoder: typeDecoder(f.Type),
-			index:   i,
+			name:      tags.name,
+			decoder:   typeDecoder(f.Type, tags),
+			index:     i,
+			omitEmpty: tags.omitEmpty,
+			original:  tags.original,
 		})
 	}
 
@@ -242,11 +278,19 @@ func structDecoder(t reflect.Type) decoderFunc {
 
 		for _, f := range fields {
 			sf := rv.Field(f.index)
+			if f.original {
+				if sf.Type() != reflect.TypeOf(s) {
+					panic(&UnmarshalTypeMismatchError{v, rv.Type(), ", field with tag \"original\" must have type Struct"})
+				}
+				sf.Set(reflect.ValueOf(s))
+				continue
+			}
 			fv, ok := s.MaybeGet(f.name)
-			if !ok {
+			if ok {
+				f.decoder(fv, sf)
+			} else if !f.omitEmpty {
 				panic(&UnmarshalTypeMismatchError{v, rv.Type(), ", missing field \"" + f.name + "\""})
 			}
-			f.decoder(fv, sf)
 		}
 	}
 
@@ -287,7 +331,7 @@ func sliceDecoder(t reflect.Type) decoderFunc {
 	d = func(v types.Value, rv reflect.Value) {
 		var slice reflect.Value
 		if rv.IsNil() {
-			slice = reflect.MakeSlice(t, 0, int(v.(types.Collection).Len()))
+			slice = rv
 		} else {
 			slice = rv.Slice(0, 0)
 		}
@@ -300,7 +344,7 @@ func sliceDecoder(t reflect.Type) decoderFunc {
 	}
 
 	decoderCache.set(t, d)
-	decoder = typeDecoder(t.Elem())
+	decoder = typeDecoder(t.Elem(), nomsTags{})
 	return d
 }
 
@@ -329,11 +373,43 @@ func arrayDecoder(t reflect.Type) decoderFunc {
 	}
 
 	decoderCache.set(t, d)
-	decoder = typeDecoder(t.Elem())
+	decoder = typeDecoder(t.Elem(), nomsTags{})
 	return d
 }
 
-func mapDecoder(t reflect.Type) decoderFunc {
+func mapFromSetDecoder(t reflect.Type) decoderFunc {
+	d := setDecoderCache.get(t)
+	if d != nil {
+		return d
+	}
+
+	var decoder decoderFunc
+
+	d = func(v types.Value, rv reflect.Value) {
+		m := rv
+
+		nomsSet, ok := v.(types.Set)
+		if !ok {
+			panic(&UnmarshalTypeMismatchError{v, t, `, field has "set" tag`})
+		}
+
+		nomsSet.IterAll(func(v types.Value) {
+			keyRv := reflect.New(t.Key()).Elem()
+			decoder(v, keyRv)
+			if m.IsNil() {
+				m = reflect.MakeMap(t)
+			}
+			m.SetMapIndex(keyRv, reflect.New(t.Elem()).Elem())
+		})
+		rv.Set(m)
+	}
+
+	setDecoderCache.set(t, d)
+	decoder = typeDecoder(t.Key(), nomsTags{})
+	return d
+}
+
+func mapDecoder(t reflect.Type, tags nomsTags) decoderFunc {
 	d := decoderCache.get(t)
 	if d != nil {
 		return d
@@ -344,8 +420,11 @@ func mapDecoder(t reflect.Type) decoderFunc {
 
 	d = func(v types.Value, rv reflect.Value) {
 		m := rv
-		if m.IsNil() {
-			m = reflect.MakeMap(t)
+
+		// Special case decoding failure if it looks like the "set" tag is missing,
+		// because it's helpful.
+		if _, ok := v.(types.Set); ok && !tags.set {
+			panic(&UnmarshalTypeMismatchError{v, t, `, field missing "set" tag`})
 		}
 
 		nomsMap, ok := v.(types.Map)
@@ -358,14 +437,17 @@ func mapDecoder(t reflect.Type) decoderFunc {
 			keyDecoder(k, keyRv)
 			valueRv := reflect.New(t.Elem()).Elem()
 			valueDecoder(v, valueRv)
+			if m.IsNil() {
+				m = reflect.MakeMap(t)
+			}
 			m.SetMapIndex(keyRv, valueRv)
 		})
 		rv.Set(m)
 	}
 
 	decoderCache.set(t, d)
-	keyDecoder = typeDecoder(t.Key())
-	valueDecoder = typeDecoder(t.Elem())
+	keyDecoder = typeDecoder(t.Key(), nomsTags{})
+	valueDecoder = typeDecoder(t.Elem(), nomsTags{})
 	return d
 }
 
@@ -381,7 +463,7 @@ func interfaceDecoder(t reflect.Type) decoderFunc {
 	return func(v types.Value, rv reflect.Value) {
 		t := getGoTypeForNomsType(v.Type(), rv.Type(), v)
 		i := reflect.New(t).Elem()
-		typeDecoder(t)(v, i)
+		typeDecoder(t, nomsTags{})(v, i)
 		rv.Set(i)
 	}
 }
@@ -412,4 +494,11 @@ func getGoTypeForNomsType(nt *types.Type, rt reflect.Type, v types.Value) reflec
 	default:
 		panic(&UnmarshalTypeMismatchError{Value: v, Type: rt})
 	}
+}
+
+func shouldMapDecodeFromSet(rt reflect.Type, tags nomsTags) bool {
+	// map[T]struct{} `noms:,"set"`
+	return tags.set &&
+		rt.Elem().Kind() == reflect.Struct &&
+		rt.Elem().NumField() == 0
 }

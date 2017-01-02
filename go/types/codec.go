@@ -37,6 +37,16 @@ func DecodeFromBytes(data []byte, vr ValueReader, tc *TypeCache) Value {
 	return v
 }
 
+func decodeFromBytesWithValidation(data []byte, vr ValueReader, tc *TypeCache) Value {
+	tc.Lock()
+	defer tc.Unlock()
+	br := &binaryNomsReader{data, 0}
+	dec := newValueDecoderWithValidation(br, vr, tc)
+	v := dec.readValue()
+	d.PanicIfFalse(br.pos() == uint32(len(data)))
+	return v
+}
+
 // DecodeValue decodes a value from a chunk source. It is an error to provide an empty chunk.
 func DecodeValue(c chunks.Chunk, vr ValueReader) Value {
 	d.PanicIfTrue(c.IsEmpty())
@@ -160,10 +170,10 @@ func (b *binaryNomsReader) readIdent(tc *TypeCache) uint32 {
 }
 
 func (b *binaryNomsReader) readHash() hash.Hash {
-	digest := hash.Digest{}
-	copy(digest[:], b.buff[b.offset:b.offset+hash.ByteLen])
+	h := hash.Hash{}
+	copy(h[:], b.buff[b.offset:b.offset+hash.ByteLen])
 	b.offset += hash.ByteLen
-	return hash.New(digest)
+	return h
 }
 
 type binaryNomsWriter struct {
@@ -266,12 +276,12 @@ func (b *binaryNomsWriter) writeString(v string) {
 
 func (b *binaryNomsWriter) writeHash(h hash.Hash) {
 	b.ensureCapacity(hash.ByteLen)
-	digest := h.Digest()
-	copy(b.buff[b.offset:], digest[:])
+	copy(b.buff[b.offset:], h[:])
 	b.offset += hash.ByteLen
 }
 
 func (b *binaryNomsWriter) appendType(t *Type) {
+	ensureTypeSerialization(t)
 	data := t.serialization
 	size := uint32(len(data))
 	b.ensureCapacity(size)

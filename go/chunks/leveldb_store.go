@@ -100,6 +100,14 @@ func (l *LevelDBStore) Get(ref hash.Hash) Chunk {
 	return l.getByKey(l.toChunkKey(ref), ref)
 }
 
+func (l *LevelDBStore) GetMany(hashes []hash.Hash) (batch []Chunk) {
+	batch = make([]Chunk, len(hashes))
+	for i, h := range hashes {
+		batch[i] = l.Get(h)
+	}
+	return
+}
+
 func (l *LevelDBStore) Has(ref hash.Hash) bool {
 	if l.internalLevelDBStore == nil {
 		d.Panic("Cannot use LevelDBStore after Close().")
@@ -138,6 +146,8 @@ func (l *LevelDBStore) PutMany(chunks []Chunk) (e BackpressureError) {
 	return
 }
 
+func (l *LevelDBStore) Flush() {}
+
 func (l *LevelDBStore) Close() error {
 	if l.closeBackingStore {
 		l.internalLevelDBStore.Close()
@@ -146,11 +156,10 @@ func (l *LevelDBStore) Close() error {
 	return nil
 }
 
-func (l *LevelDBStore) toChunkKey(r hash.Hash) []byte {
-	digest := r.DigestSlice()
-	out := make([]byte, len(l.chunkPrefix), len(l.chunkPrefix)+len(digest))
+func (l *LevelDBStore) toChunkKey(h hash.Hash) []byte {
+	out := make([]byte, len(l.chunkPrefix), len(l.chunkPrefix)+hash.ByteLen)
 	copy(out, l.chunkPrefix)
-	return append(out, digest...)
+	return append(out, h[:]...)
 }
 
 func (l *LevelDBStore) setVersIfUnset() {

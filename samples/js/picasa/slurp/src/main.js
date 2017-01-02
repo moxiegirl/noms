@@ -8,7 +8,10 @@ import argv from 'yargs';
 import {
   DatasetSpec,
   jsonToNoms,
+  makeStructType,
   newStruct,
+  newStructWithType,
+  valueType,
 } from '@attic/noms';
 import {
   default as fetch,
@@ -114,6 +117,7 @@ async function main(): Promise<void> {
 
   // Get album and face URL endpoints ahead of time so they can be requested in parallel batches.
   let numPhotosSum = 0;
+  let googleSucks = false;
   const albumURLs = [];
   const faceURLs = [];
 
@@ -123,6 +127,14 @@ async function main(): Promise<void> {
     numPhotosSum += numPhotos;
 
     for (let i = 0; i < numPhotos; i += args['batch-size']) {
+      // See https://code.google.com/p/gdata-issues/issues/detail?id=7004 :(
+      // We can't get any more data than this. I suppose the answer is the gdrive API or maybe
+      // takeout of something.
+      if (i >= 10002) {
+        googleSucks = true;
+        break;
+      }
+
       // Note: start-index is (i + 1) because it's 1-based.
       // TODO: This is racy because photos may be added or removed between batch calls. Perhaps try
       // using published-min and published-max?
@@ -149,6 +161,10 @@ async function main(): Promise<void> {
 
   // Note: may be missing photos, see https://github.com/attic-labs/noms/issues/2698.
   console.log(`\nSlurped ${numPhotosSoFar} photos`);
+  if (googleSucks) {
+    console.error('Google is why we can\'t have nice things: ' +
+                  'https://code.google.com/p/gdata-issues/issues/detail?id=7004');
+  }
 
   const albums = concatApiEntries((albumsArray: Albums[]));
   const faces = concatApiEntries((facesArray: Faces[]));
@@ -158,26 +174,32 @@ async function main(): Promise<void> {
   // necessary. Consider doing something about that.
 
   const j = (v: any) => jsonToNoms(v);
-  return db.commit(out, newStruct('', {
-    albums: j(albums),
-    faces: j(faces),
-    user: j(user),
-  }, {
-    meta: {
-      date: new Date().toISOString(),
-    },
-  })).then(() => db.close());
+
+  console.log('Committing...');
+
+  // The type of this dataset is really large. As a hack to help keep the size of the root commit
+  // chunk under control, we stick into a field of type Value.
+  return db.commit(out, newStructWithType(makeStructType('', {value: valueType}), [
+    newStruct('', {
+      albums: j(albums),
+      faces: j(faces),
+      user: j(user),
+    })]), {
+      meta: newStruct('', {
+        date: new Date().toISOString(),
+      }),
+    }).then(() => db.close());
 }
 
-function callPicasa(path: string): Promise<any> {
+async function callPicasa(path: string): Promise<any> {
   const url = 'https://picasaweb.google.com/data/feed/' + path;
   return fetch(new Request(url, {
     headers: new Headers({
       'Authorization': `Bearer ${accessToken}`,
     }),
-  })).then(resp => {
+  })).then(async resp => {
     if (Math.floor(resp.status / 100) !== 2) {
-      throw new Error(`${resp.status} ${resp.statusText}: ${url}`);
+      throw new Error(`${resp.status} ${resp.statusText}: ${url}: ${await resp.text()}`);
     }
     return resp.json();
   });

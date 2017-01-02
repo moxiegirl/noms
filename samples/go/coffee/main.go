@@ -26,7 +26,9 @@ var people = []string{
 	"arv",
 	"dan",
 	"ehalpern",
-	"kalman",
+	// Disabling kalman until back in office
+	// "kalman",
+	"jenna",
 	"rafael",
 	"zane",
 }
@@ -66,7 +68,7 @@ func main() {
 		return
 	}
 
-	if now.Hour() < 10 {
+	if now.Hour() < 15 {
 		fmt.Println("Waiting until people show up at work.")
 		return
 	}

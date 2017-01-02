@@ -421,6 +421,32 @@ func TestEncodeStructWithArrayOfNomsValue(t *testing.T) {
 	}).Equals(v))
 }
 
+func TestEncodeNomsTypePtr(t *testing.T) {
+	assert := assert.New(t)
+
+	testMarshal := func(g interface{}, expected types.Value) {
+		v, err := Marshal(g)
+		assert.NoError(err)
+		assert.Equal(expected, v)
+	}
+
+	type S struct {
+		Type *types.Type
+	}
+
+	primitive := types.StringType
+	testMarshal(S{primitive}, types.NewStruct("S", types.StructData{"type": primitive}))
+
+	complex := types.MakeStructType("Complex",
+		[]string{"stuff"},
+		[]*types.Type{types.StringType},
+	)
+	testMarshal(S{complex}, types.NewStruct("S", types.StructData{"type": complex}))
+
+	var empty *types.Type
+	testMarshal(S{empty}, types.NewStruct("S", types.StructData{"type": empty}))
+}
+
 func TestEncodeRecursive(t *testing.T) {
 	assert := assert.New(t)
 
@@ -501,6 +527,178 @@ func TestEncodeInterface(t *testing.T) {
 		types.String("a"), types.Bool(true),
 		types.NewStruct("", types.StructData{"name": types.String("b")}), types.Number(42),
 	).Equals(v))
+}
+
+func TestEncodeSet(t *testing.T) {
+	assert := assert.New(t)
+
+	v, err := Marshal(struct {
+		A map[int]struct{} `noms:",set"`
+		B map[int]struct{}
+		C map[int]string      `noms:",set"`
+		D map[string]struct{} `noms:",set"`
+		E map[string]struct{}
+		F map[string]int `noms:",set"`
+		G []int          `noms:",set"`
+		H string         `noms:",set"`
+	}{
+		map[int]struct{}{0: {}, 1: {}, 2: {}},
+		map[int]struct{}{3: {}, 4: {}, 5: {}},
+		map[int]string{},
+		map[string]struct{}{"A": {}, "B": {}, "C": {}},
+		map[string]struct{}{"D": {}, "E": {}, "F": {}},
+		map[string]int{},
+		[]int{},
+		"",
+	})
+	assert.NoError(err)
+	s, ok := v.(types.Struct)
+	assert.True(ok)
+
+	expect := map[string]types.NomsKind{
+		"a": types.SetKind,
+		"b": types.MapKind,
+		"c": types.MapKind,
+		"d": types.SetKind,
+		"e": types.MapKind,
+		"f": types.MapKind,
+		"g": types.ListKind,
+		"h": types.StringKind,
+	}
+	for fieldName, kind := range expect {
+		assert.Equal(kind, s.Get(fieldName).Type().Kind())
+	}
+
+	// Test both the Set values are correct, and that the equivalent typed Map
+	// are correct in case the Set marshaling interferes with it.
+
+	a := s.Get("a").(types.Set)
+	assert.True(a.Has(types.Number(0)))
+	assert.True(a.Has(types.Number(1)))
+	assert.True(a.Has(types.Number(2)))
+
+	b := s.Get("b").(types.Map)
+	assert.True(b.Has(types.Number(3)))
+	assert.True(b.Has(types.Number(4)))
+	assert.True(b.Has(types.Number(5)))
+
+	d := s.Get("d").(types.Set)
+	assert.True(d.Has(types.String("A")))
+	assert.True(d.Has(types.String("B")))
+	assert.True(d.Has(types.String("C")))
+
+	e := s.Get("e").(types.Map)
+	assert.True(e.Has(types.String("D")))
+	assert.True(e.Has(types.String("E")))
+	assert.True(e.Has(types.String("F")))
+}
+
+func TestEncodeSetWithTags(t *testing.T) {
+	assert := assert.New(t)
+
+	v, err := Marshal(struct {
+		A map[int]struct{} `noms:"foo,set"`
+		B map[int]struct{} `noms:",omitempty,set"`
+		C map[int]struct{} `noms:"bar,omitempty,set"`
+	}{
+		A: map[int]struct{}{0: {}, 1: {}},
+		C: map[int]struct{}{2: {}, 3: {}},
+	})
+	assert.NoError(err)
+	s, ok := v.(types.Struct)
+	assert.True(ok)
+
+	_, ok = s.MaybeGet("a")
+	assert.False(ok)
+	_, ok = s.MaybeGet("b")
+	assert.False(ok)
+	_, ok = s.MaybeGet("c")
+	assert.False(ok)
+
+	foo, ok := s.Get("foo").(types.Set)
+	assert.True(ok)
+	assert.True(types.NewSet(types.Number(0), types.Number(1)).Equals(foo))
+
+	bar, ok := s.Get("bar").(types.Set)
+	assert.True(ok)
+	assert.True(types.NewSet(types.Number(2), types.Number(3)).Equals(bar))
+}
+
+func TestInvalidTag(t *testing.T) {
+	_, err := Marshal(struct {
+		F string `noms:",omitEmpty"`
+	}{"F"})
+	assert.Error(t, err)
+	assert.Equal(t, `Unrecognized tag: omitEmpty`, err.Error())
+}
+
+func TestEncodeCanSkipUnexportedField(t *testing.T) {
+	assert := assert.New(t)
+
+	type S struct {
+		Abc         int
+		notExported bool `noms:"-"`
+	}
+	s := S{42, true}
+	v, err := Marshal(s)
+	assert.NoError(err)
+	assert.True(types.NewStruct("S", types.StructData{
+		"abc": types.Number(42),
+	}).Equals(v))
+}
+
+func TestEncodeOriginal(t *testing.T) {
+	assert := assert.New(t)
+
+	type S struct {
+		Foo int          `noms:",omitempty"`
+		Bar types.Struct `noms:",original"`
+	}
+
+	var s S
+	var err error
+	var orig types.Struct
+
+	// New field value clobbers old field value
+	orig = types.NewStruct("S", types.StructData{
+		"foo": types.Number(42),
+	})
+	err = Unmarshal(orig, &s)
+	assert.NoError(err)
+	s.Foo = 43
+	assert.True(MustMarshal(s).Equals(orig.Set("foo", types.Number(43))))
+
+	// New field extends old struct
+	orig = types.NewStruct("S", types.StructData{})
+	err = Unmarshal(orig, &s)
+	assert.NoError(err)
+	s.Foo = 43
+	assert.True(MustMarshal(s).Equals(orig.Set("foo", types.Number(43))))
+
+	// Old struct name always used
+	orig = types.NewStruct("Q", types.StructData{})
+	err = Unmarshal(orig, &s)
+	assert.NoError(err)
+	s.Foo = 43
+	assert.True(MustMarshal(s).Equals(orig.Set("foo", types.Number(43))))
+
+	// Field type of base are preserved
+	st := types.MakeStructType("S", []string{"foo"},
+		[]*types.Type{types.MakeUnionType(types.StringType, types.NumberType)})
+	orig = types.NewStructWithType(st, []types.Value{types.Number(42)})
+	err = Unmarshal(orig, &s)
+	assert.NoError(err)
+	s.Foo = 43
+	out := MustMarshal(s)
+	assert.True(out.Equals(orig.Set("foo", types.Number(43))))
+	assert.True(out.Type().Equals(st))
+
+	// It's OK to have an empty original field
+	s = S{
+		Foo: 42,
+	}
+	assert.True(MustMarshal(s).Equals(
+		types.NewStruct("S", types.StructData{"foo": types.Number(float64(42))})))
 }
 
 type TestInterface interface {

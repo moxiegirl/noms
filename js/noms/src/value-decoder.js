@@ -6,7 +6,7 @@
 
 import Blob, {BlobLeafSequence} from './blob.js';
 import Ref, {constructRef} from './ref.js';
-import {newStructWithType} from './struct.js';
+import {newStructWithValues} from './struct.js';
 import type Struct from './struct.js';
 import type {NomsKind} from './noms-kind.js';
 import {
@@ -16,7 +16,7 @@ import {
 } from './type.js';
 import {OrderedKey, MetaTuple} from './meta-sequence.js';
 import {invariant, notNull} from './assert.js';
-import {isPrimitiveKind, kindToString, Kind} from './noms-kind.js';
+import {kindToString, Kind} from './noms-kind.js';
 import List, {ListLeafSequence} from './list.js';
 import Map, {MapLeafSequence} from './map.js';
 import Set, {SetLeafSequence} from './set.js';
@@ -73,7 +73,6 @@ export default class ValueDecoder {
       }
     }
 
-    invariant(isPrimitiveKind(k));
     return getPrimitiveType(k);
   }
 
@@ -201,7 +200,7 @@ export default class ValueDecoder {
       values[i] = this.readValue();
     }
 
-    return newStructWithType(type, values);
+    return newStructWithValues(type, values);
   }
 
   readCachedStructType(): ?Type<StructDesc> {
@@ -232,6 +231,6 @@ export default class ValueDecoder {
       fieldNames[i] = this._r.readString();
       fieldTypes[i] = this.readType();
     }
-    return this._tc.makeStructTypeQuickly(name, fieldNames, fieldTypes);
+    return this._tc.makeStructTypeQuickly(name, fieldNames, fieldTypes, 'no-validate');
   }
 }

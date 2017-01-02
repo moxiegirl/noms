@@ -5,8 +5,10 @@
 package main
 
 import (
+	"fmt"
 	"testing"
 
+	"github.com/attic-labs/noms/go/chunks"
 	"github.com/attic-labs/noms/go/spec"
 	"github.com/attic-labs/noms/go/types"
 	"github.com/attic-labs/noms/go/util/clienttest"
@@ -23,11 +25,11 @@ type nomsShowTestSuite struct {
 }
 
 const (
-	res1 = "struct Commit {\n  meta: struct {},\n  parents: Set<Ref<Cycle<0>>>,\n  value: Ref<String>,\n}({\n  meta:  {},\n  parents: {},\n  value: 5cgfu2vk4nc21m1vjkjjpd2kvcm2df7q,\n})\n"
+	res1 = "Commit {\n  meta:  {},\n  parents: {},\n  value: 5cgfu2vk4nc21m1vjkjjpd2kvcm2df7q,\n}\n"
 	res2 = "\"test string\"\n"
-	res3 = "struct Commit {\n  meta: struct {},\n  parents: Set<Ref<struct Commit {\n    meta: struct {},\n    parents: Set<Ref<Cycle<0>>>,\n    value: Ref<List<Number | String>> | Ref<String>,\n  }>>,\n  value: Ref<List<Number | String>>,\n}({\n  meta:  {},\n  parents: {\n    4g7ggl6999v5mlucl4a507n7k3kvckiq,\n  },\n  value: 82adk7hfcudg8fktittm672to66t6qeu,\n})\n"
-	res4 = "List<Number | String>([\n  \"elem1\",\n  2,\n  \"elem3\",\n])\n"
-	res5 = "struct Commit {\n  meta: struct {},\n  parents: Set<Ref<struct Commit {\n    meta: struct {},\n    parents: Set<Ref<Cycle<0>>>,\n    value: Ref<List<Number | String>> | Ref<String>,\n  }>>,\n  value: Ref<String>,\n}({\n  meta:  {},\n  parents: {\n    3tmg89vabs2k6hotdock1kuo13j4lmqv,\n  },\n  value: 5cgfu2vk4nc21m1vjkjjpd2kvcm2df7q,\n})\n"
+	res3 = "Commit {\n  meta:  {},\n  parents: {\n    4g7ggl6999v5mlucl4a507n7k3kvckiq,\n  },\n  value: 82adk7hfcudg8fktittm672to66t6qeu,\n}\n"
+	res4 = "[\n  \"elem1\",\n  2,\n  \"elem3\",\n]\n"
+	res5 = "Commit {\n  meta:  {},\n  parents: {\n    3tmg89vabs2k6hotdock1kuo13j4lmqv,\n  },\n  value: 5cgfu2vk4nc21m1vjkjjpd2kvcm2df7q,\n}\n"
 )
 
 func (s *nomsShowTestSuite) writeTestData(str string, value types.Value) types.Ref {
@@ -68,4 +70,52 @@ func (s *nomsShowTestSuite) TestNomsShow() {
 	_ = s.writeTestData(str, s1)
 	res, _ = s.MustRun(main, []string{"show", str})
 	test.EqualsIgnoreHashes(s.T(), res5, res)
+}
+
+func (s *nomsShowTestSuite) TestNomsShowNotFound() {
+	str := spec.CreateValueSpecString("ldb", s.LdbDir, "not-there")
+	stdout, stderr, err := s.Run(main, []string{"show", str})
+	s.Equal("", stdout)
+	s.Equal(fmt.Sprintf("Object not found: %s\n", str), stderr)
+	s.Nil(err)
+}
+
+func (s *nomsShowTestSuite) TestNomsShowRaw() {
+	datasetName := "showRaw"
+	str := spec.CreateValueSpecString("ldb", s.LdbDir, datasetName)
+	sp, err := spec.ForDataset(str)
+	s.NoError(err)
+	defer sp.Close()
+
+	db := sp.GetDatabase()
+
+	// Put a value into the db, get its raw serialization, then deserialize it and ensure it comes
+	// out to same thing.
+	test := func(in types.Value) {
+		r1 := db.WriteValue(in)
+		res, _ := s.MustRun(main, []string{"show", "--raw",
+			spec.CreateValueSpecString("ldb", s.LdbDir, "#"+r1.TargetHash().String())})
+		ch := chunks.NewChunk([]byte(res))
+		out := types.DecodeValue(ch, db)
+		s.True(out.Equals(in))
+	}
+
+	// Primitive value with no child chunks
+	test(types.String("hello"))
+
+	// Ref (one child chunk)
+	test(db.WriteValue(types.Number(42)))
+
+	// Prolly tree with multiple child chunks
+	items := make([]types.Value, 10000)
+	for i := 0; i < len(items); i++ {
+		items[i] = types.Number(i)
+	}
+	l := types.NewList(items...)
+	numChildChunks := 0
+	l.WalkRefs(func(r types.Ref) {
+		numChildChunks++
+	})
+	s.True(numChildChunks > 0)
+	test(l)
 }
